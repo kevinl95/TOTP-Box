@@ -1,8 +1,13 @@
 [package]
-name = "secret_contract_example"
-version = "0.1.0"
-authors = ["SecretTemplateExample"]
-edition = "2021"
+name = "TOTPBox"
+version = "1.0.0"
+authors = ["Kevin Loeffler"]
+edition = "2024"
+publish = false
+description = "Generating Time-based One-Time Passwords on the Secret Network"
+license = "Apache 2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -18,28 +23,9 @@ panic = 'abort'
 incremental = false
 overflow-checks = true
 
-[features]
-default = []
-# for quicker tests, cargo test --lib
-# for more explicit tests, cargo test --features=backtraces
-backtraces = ["cosmwasm-std/backtraces"]
-
 [dependencies]
-cosmwasm-std = { git = "https://github.com/scrtlabs/cosmwasm", tag = "v1.1.9-secret" }
-cosmwasm-storage = { git = "https://github.com/scrtlabs/cosmwasm", tag = "v1.1.9-secret" }
-schemars = { version = "0.8.11" }
-serde = { version = "1.0" }
-thiserror = { version = "1.0" }
-cosmwasm-schema = "1.0.0"
-
-# Uncomment these for some common extra tools
-# secret-toolkit = { git = "https://github.com/scrtlabs/secret-toolkit", tag = "v0.8.0" }
-# cw-storage-plus = { version = "1.0.1", default-features = false }
-
-# [patch.crates-io]
-# uncomment this if you use cw-storage-plus
-# cosmwasm-std = { git = "https://github.com/scrtlabs/cosmwasm", tag = "v1.1.9-secret" }
-
-[[bin]]
-name = "schema"
-required-features = ["schema"]
+cosmwasm-std = { git = "https://github.com/scrtlabs/cosmwasm", branch = "secret" }
+cosmwasm-storage = { git = "https://github.com/scrtlabs/cosmwasm", branch = "secret" }
+serde = { version = "=1.0.103", default-features = false, features = ["derive"] }
+thiserror = "1.0"
+totp-rs = "^5.0"

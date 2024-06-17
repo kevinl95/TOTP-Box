@@ -1,186 +1,175 @@
+use std::cmp::max;
+use std::time::SystemTime;
 use cosmwasm_std::{
-    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult,
+    entry_point, to_binary, Deps, DepsMut, Env,
+    MessageInfo, QueryResponse, Response, StdError, StdResult
 };
 
-use crate::msg::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{config, config_read, State};
+use crate::errors::{CustomContractError};
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg, RicherResponse};
+use crate::state::{config, config_read, ContractState, Millionaire, State};
+
+use totp_rs::{Algorithm, TOTP, Secret};
+
 
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut,
     _env: Env,
-    info: MessageInfo,
-    msg: InstantiateMsg,
+    _info: MessageInfo,
+    _msg: InstantiateMsg,
 ) -> StdResult<Response> {
-    let state = State {
-        count: msg.count,
-        owner: info.sender.clone(),
-    };
 
-    deps.api
-        .debug(format!("Contract was initialized by {}", info.sender).as_str());
+    let state = State::default();
     config(deps.storage).save(&state)?;
 
     Ok(Response::default())
 }
 
 #[entry_point]
-pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
+pub fn execute(
+    deps: DepsMut,
+    _env: Env,
+    _info: MessageInfo,
+    msg: ExecuteMsg,
+) -> Result<Response, CustomContractError> {
     match msg {
-        ExecuteMsg::Increment {} => try_increment(deps, env),
-        ExecuteMsg::Reset { count } => try_reset(deps, info, count),
+        ExecuteMsg::SubmitSecret { name, secret } => try_submit_secret(deps, name, secret),
+        ExecuteMsg::Reset {  } => try_reset(deps),
     }
-}
-
-pub fn try_increment(deps: DepsMut, _env: Env) -> StdResult<Response> {
-    config(deps.storage).update(|mut state| -> Result<_, StdError> {
-        state.count += 1;
-        Ok(state)
-    })?;
-
-    deps.api.debug("count incremented successfully");
-    Ok(Response::default())
-}
-
-pub fn try_reset(deps: DepsMut, info: MessageInfo, count: i32) -> StdResult<Response> {
-    let sender_address = info.sender.clone();
-    config(deps.storage).update(|mut state| {
-        if sender_address != state.owner {
-            return Err(StdError::generic_err("Only the owner can reset count"));
-        }
-        state.count = count;
-        Ok(state)
-    })?;
-
-    deps.api.debug("count reset successfully");
-    Ok(Response::default())
 }
 
 #[entry_point]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<QueryResponse> {
     match msg {
-        QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
+        QueryMsg::GetToken {} => to_binary(&query_get_totp(deps)?),
     }
 }
 
-fn query_count(deps: Deps) -> StdResult<CountResponse> {
+pub fn try_submit_secret(
+    deps: DepsMut,
+    name: String,
+    secret: String
+) -> Result<Response, CustomContractError> {
+    let mut state = config(deps.storage).load()?;
+
+    match state.state {
+        ContractState::Init => {
+            state.service = Service::new(name, secret);
+            state.state = ContractState::Done;
+        }
+        ContractState::Done => {
+            return Err(CustomContractError::AlreadyAddedSecret);
+        }
+    }
+
+    config(deps.storage).save(&state)?;
+
+    Ok(Response::new())
+}
+
+pub fn try_reset(
+    deps: DepsMut,
+) -> Result<Response, CustomContractError> {
+    let mut state = config(deps.storage).load()?;
+
+    state.state = ContractState::Init;
+    config(deps.storage).save(&state)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "reset state"))
+}
+
+fn query_get_totp(deps: Deps) -> StdResult<TOTPResponse> {
     let state = config_read(deps.storage).load()?;
-    Ok(CountResponse { count: state.count })
+
+    if state.state != ContractState::Done {
+        return Err(StdError::generic_err("Can't compute a token until the secret is loaded!"));
+    }
+
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        Secret::Raw(state.service.secret.as_bytes().to_vec()).to_bytes().unwrap(),
+    ).unwrap();
+
+    let resp = TOTPResponse {
+        token: totp.generate_current().unwrap();
+    };
+
+    Ok(resp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosmwasm_std::testing::*;
-    use cosmwasm_std::{from_binary, Coin, StdError, Uint128};
+
+    use cosmwasm_std::testing::{mock_env, mock_info, mock_dependencies};
+    use cosmwasm_std::coins;
 
     #[test]
-    fn proper_initialization() {
+    fn proper_instantialization() {
         let mut deps = mock_dependencies();
-        let info = mock_info(
-            "creator",
-            &[Coin {
-                denom: "earth".to_string(),
-                amount: Uint128::new(1000),
-            }],
-        );
-        let init_msg = InstantiateMsg { count: 17 };
+
+        let msg = InstantiateMsg {};
+        let info = mock_info("creator", &coins(1000, "earth"));
 
         // we can just call .unwrap() to assert this was a success
-        let res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
-
+        let res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
         assert_eq!(0, res.messages.len());
 
         // it worked, let's query the state
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(17, value.count);
+        let _ = query_get_totp(deps.as_ref()).unwrap_err();
     }
 
     #[test]
-    fn increment() {
-        let mut deps = mock_dependencies_with_balance(&[Coin {
-            denom: "token".to_string(),
-            amount: Uint128::new(2),
-        }]);
-        let info = mock_info(
-            "creator",
-            &[Coin {
-                denom: "token".to_string(),
-                amount: Uint128::new(2),
-            }],
-        );
-        let init_msg = InstantiateMsg { count: 17 };
+    fn get_totp() {
+        let mut deps = mock_dependencies();
 
-        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
+        let msg = InstantiateMsg {};
+        let info = mock_info("creator", &coins(2, "token"));
+        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
-        // anyone can increment
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: "token".to_string(),
-                amount: Uint128::new(2),
-            }],
-        );
+        let msg_service = ExecuteMsg::SubmitSecret {secret: "TestSecretSuperSecret", name: "Gmail".to_string()};
 
-        let exec_msg = ExecuteMsg::Increment {};
-        let _res = execute(deps.as_mut(), mock_env(), info, exec_msg).unwrap();
+        let info = mock_info("creator", &[]);
 
-        // should increase counter by 1
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(18, value.count);
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg_service).unwrap();
+
+        // it worked, let's query the state
+        let value = query_get_totp(deps.as_ref()).unwrap();
+
+        assert_eq!(value.token.len(), 6)
+
     }
 
     #[test]
-    fn reset() {
-        let mut deps = mock_dependencies_with_balance(&[Coin {
-            denom: "token".to_string(),
-            amount: Uint128::new(2),
-        }]);
-        let info = mock_info(
-            "creator",
-            &[Coin {
-                denom: "token".to_string(),
-                amount: Uint128::new(2),
-            }],
-        );
-        let init_msg = InstantiateMsg { count: 17 };
+    fn test_reset_state() {
+        let mut deps = mock_dependencies();
 
-        let _res = instantiate(deps.as_mut(), mock_env(), info, init_msg).unwrap();
+        let msg = InstantiateMsg {};
+        let info = mock_info("creator", &coins(2, "token"));
+        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
-        // not anyone can reset
-        let info = mock_info(
-            "anyone",
-            &[Coin {
-                denom: "token".to_string(),
-                amount: Uint128::new(2),
-            }],
-        );
-        let exec_msg = ExecuteMsg::Reset { count: 5 };
+        let msg_service = ExecuteMsg::SubmitSecret {secret: "TestSecretSuperSecret", name: "Gmail".to_string()};
 
-        let res = execute(deps.as_mut(), mock_env(), info, exec_msg);
+        let info = mock_info("creator", &[]);
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg_service).unwrap();
 
-        match res {
-            Err(StdError::GenericErr { .. }) => {}
-            _ => panic!("Must return unauthorized error"),
-        }
+        // it worked, let's query the state
+        let value1 = query_get_totp(deps.as_ref()).unwrap();
 
-        // only the original creator can reset the counter
-        let info = mock_info(
-            "creator",
-            &[Coin {
-                denom: "token".to_string(),
-                amount: Uint128::new(2),
-            }],
-        );
-        let exec_msg = ExecuteMsg::Reset { count: 5 };
+        let reset_msg = ExecuteMsg::Reset {};
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), reset_msg).unwrap();
 
-        let _res = execute(deps.as_mut(), mock_env(), info, exec_msg).unwrap();
+        let msg_service2 = ExecuteMsg::SubmitSecret {secret: "TestSecretSuperSecret", name: "Gmail".to_string()};
 
-        // should now be 5
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(5, value.count);
-    }
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg_service2).unwrap();
+
+        // it worked, let's query the state
+        let value2 = query_get_totp(deps.as_ref()).unwrap();
+
+        assert_ne!(&value1.token, @value2.token)    }
 }
